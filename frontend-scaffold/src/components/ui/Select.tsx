@@ -42,6 +42,7 @@ const Select: React.FC<SelectProps> = ({
           className={`w-full px-4 py-3 border-2 border-black bg-white text-black font-medium
             focus:outline-none focus-visible:ring-2 focus-visible:ring-black focus-visible:ring-offset-2 focus:shadow-brutalist
             appearance-none cursor-pointer
+            dark:bg-zinc-900 dark:text-white dark:border-white
             ${error ? 'border-red-600' : ''} ${className}`}
           aria-invalid={error ? 'true' : 'false'}
           aria-describedby={errorId}
