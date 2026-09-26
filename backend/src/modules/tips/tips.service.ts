@@ -7,10 +7,12 @@ import { prisma } from '../../db/prisma.js';
 import { BadRequestError, NotFoundError } from '../../common/errors/AppError.js';
 import { logger } from '../../common/utils/logger.js';
 import { rpcCall } from '../../common/stellar/rpcClient.js';
+import { classifyFailure, observeTip } from '../../common/observability/businessMetrics.js';
 import { TipStatus } from '../../types/enums.js';
 import type { RecordTipInput } from './tips.schema.js';
 import { serializeTip } from './tips.serializer.js';
 import type { TipResponseDto, TipAggregateByCreatorDto } from './tips.dto.js';
+import { invalidateCreatorAnalytics } from '../analytics/analytics.cache.js';
 
 export type { TipResponseDto, TipAggregateByCreatorDto };
 
@@ -227,7 +229,10 @@ export async function getTipsSentByAddress(
  */
 export async function recordTip(input: RecordTipInput): Promise<TipResponseDto> {
   const existing = await prisma.tip.findUnique({ where: { txHash: input.txHash } });
-  if (existing) return serializeTip(existing);
+  if (existing) {
+    observeTip('api', 'duplicate');
+    return serializeTip(existing);
+  }
 
   try {
     const { tip, created, notification } = await prisma.$transaction(
@@ -281,6 +286,7 @@ export async function recordTip(input: RecordTipInput): Promise<TipResponseDto> 
         isolationLevel: "RepeatableRead",
       },
     );
+    observeTip('api', created ? 'success' : 'duplicate', created ? input.amountStroops : undefined);
 
     // Enqueue side-effects AFTER commit — never inside transaction (connection pool safety)
     if (created) {
@@ -320,8 +326,12 @@ export async function recordTip(input: RecordTipInput): Promise<TipResponseDto> 
   } catch (err) {
     if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
       const tip = await prisma.tip.findUnique({ where: { txHash: input.txHash } });
-      if (tip) return serializeTip(tip);
+      if (tip) {
+        observeTip('api', 'duplicate');
+        return serializeTip(tip);
+      }
     }
+    observeTip('api', classifyFailure(err));
     throw err;
   }
 }
@@ -335,16 +345,16 @@ export async function recordTip(input: RecordTipInput): Promise<TipResponseDto> 
  * No external calls are held inside.
  */
 export async function confirmTip(txHash: string): Promise<TipResponseDto> {
-  return prisma.$transaction(
+  const { dto, confirmedFor } = await prisma.$transaction(
     async (tx) => {
       const tip = await tx.tip.findUnique({ where: { txHash } });
       if (!tip) throw new NotFoundError("Tip not found");
-      if (tip.status === TipStatus.CONFIRMED) return serializeTip(tip);
+      if (tip.status === TipStatus.CONFIRMED) return { dto: serializeTip(tip), confirmedFor: null };
       const updated = await tx.tip.update({
         where: { txHash },
         data: { status: TipStatus.CONFIRMED },
       });
-      return serializeTip(updated);
+      return { dto: serializeTip(updated), confirmedFor: updated.toAddress };
     },
     {
       timeout: 5000,
@@ -352,6 +362,9 @@ export async function confirmTip(txHash: string): Promise<TipResponseDto> {
       isolationLevel: "ReadCommitted",
     },
   );
+  // The creator's cached analytics now miss this tip (issue #1265).
+  if (confirmedFor) await invalidateCreatorAnalytics(confirmedFor);
+  return dto;
 }
 
 /**
