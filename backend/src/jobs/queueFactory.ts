@@ -15,11 +15,15 @@ const tracedAddBulkFns = new Map<string, TracedAddBulkFn<any>>();
 export interface QueueOptions {
   removeOnComplete?: { age: number };
   removeOnFail?: { age: number };
+  attempts?: number;
+  backoff?: { type: 'exponential'; delay: number };
 }
 
 const DEFAULT_OPTIONS: Required<QueueOptions> = {
   removeOnComplete: { age: 3600 },
   removeOnFail: { age: 86400 },
+  attempts: 3,
+  backoff: { type: 'exponential', delay: 2000 },
 };
 
 /**
